@@ -6,6 +6,9 @@ import pyshark
 import sys
 import os
 from pathlib import Path
+
+latin_sms_factor = 7 / 8
+
 def timegen(lyr):
     stryear = str(layer.scts_year)
     year = stryear[1] + stryear[0] if len(stryear) == 2 else stryear + '0'
@@ -22,59 +25,66 @@ def timegen(lyr):
     time = year + month + day + hour + minutes + seconds
     return time
 
-def lengthgen(lyr):
+def substring_finder(start_index, time):
+    start_object = start_index
+    start_index = start_object + 16 + pkthex[start_object + 16:].find(time)
+    return start_index
+
+def lengthgen(layer):
     length = int(layer.tp_user_data_length)
     if layer.tp_dcs == '8':
         sms_length = length
     else:
-        sms_length = int((length * 7) / 8) if (((length * 7) / 8) * 2) % 2 == 0 else (int(((length * 7) / 8))) + 1
+        sms_length = int(length * latin_sms_factor) if ((length * latin_sms_factor) * 2) % 2 == 0 else (int((length * latin_sms_factor))) + 1
     return sms_length
 
-dirname = sys.argv[1]
-Path('/'.join(dirname.split('/')[0:-2]) + "/edited_files").mkdir(parents=True, exist_ok=True)
+def string_editor(layer, sms_length, start_index, pkthex):
+    sms_string = "a" * sms_length * 3 #generate a long sms string
+    if "User Data Header Length" in str(layer):
+        edited_sms = ((str.encode(sms_string[0:(sms_length - 7)]).hex()))
+        edited_bytes = pkthex[:(start_index + 16 + 14)] + edited_sms + pkthex[
+                                                                       start_index + 16 + (sms_length * 2):]
+    else:
+        edited_sms = ((str.encode(sms_string[0:(sms_length)]).hex()))
+        edited_bytes = pkthex[:(start_index + 16)] + edited_sms + pkthex[start_index + 16 + (sms_length * 2):]
+    return bytes.fromhex(edited_bytes[2:-1])
+def pcap_writer(output_path):
+    counter1 = 0
+    for line in show:
+        counter1 += 1
+        scapy.wrpcap('%s.pcap' % output_path, line, append=True, sync=True)
 
-for filename in os.listdir(dirname) :
-    print("editing %s please wait ..." % filename)
-    full_path = dirname + '/' + filename
-    cap = scapy.rdpcap(full_path)
-    pcap = pyshark.FileCapture(full_path)
+def path_gen(dirname, full_path):
+    Path('/'.join(dirname.split('/')[0:-2]) + "/edited_files").mkdir(parents=True, exist_ok=True)
     output_file_name = '.'.join(full_path.split('/')[-1].split('.')[0:-1])
     output_path = '/'.join(full_path.split('/')[0:-2]) + '/edited_files/' + output_file_name + '.edited'
-    print(output_path)
+    return output_path
+
+dirname = sys.argv[1]
+
+for filename in os.listdir(dirname):
+    print("editing %s please wait ..." % filename)
+    full_path = dirname + '/' + filename
+    output_path = path_gen(dirname, full_path)
+    cap = scapy.rdpcap(full_path)
+    pcap = pyshark.FileCapture(full_path)
     show = []
     counter = 0
-    counter1 = 0
-    pcap.load_packets()
+#    pcap.load_packets()
     for packet in pcap:
-        p = cap[counter]
-        finalstr = ''
-        if 'gsm_map' in packet and 'forwardSM (46)' in str(packet.gsm_map):
-            pkt = p.__bytes__()
-            pkthex = str(hexlify(pkt))
-            start_index = 0
-            start_object = 0
-            for layer in packet:
-                if "SMS text" in str(layer):
-                    time = timegen(layer)
-                    start_object = start_index
-                    start_index = start_object + 16 + pkthex[start_object + 16:].find(time)
-                    sms_length = lengthgen(layer)
-                    sms_string = "a" * sms_length * 3
-                    if "User Data Header Length" in str(layer):
-                        edited_sms = ((str.encode(sms_string[0:(sms_length-6)]).hex()))
-                        edited_bytes = pkthex[:(start_index + 16+12)] + edited_sms + pkthex[
-                                                                                  start_index + 16 + (sms_length * 2):]
-                    else:
-                        edited_sms = ((str.encode(sms_string[0:(sms_length)]).hex()))
-                        edited_bytes = pkthex[:(start_index+16)] + edited_sms + pkthex[start_index+16+(sms_length*2):]
-                    finalstr = (bytes.fromhex(edited_bytes[2:-1]))
-                    pkthex = str(hexlify(finalstr))
-            show.append(finalstr)
-        else:
-            show.append(p)
+        finalstr = cap[counter]
+        pkthex = str(hexlify(finalstr.__bytes__()))
+        start_index = 0
+        start_object = 0
+        for layer in packet:
+            if "SMS text" in str(layer):
+                time = timegen(layer)
+                start_index = substring_finder(start_index, time)
+                sms_length = lengthgen(layer)
+                finalstr = string_editor(layer, sms_length, start_index, pkthex)
+                pkthex = str(hexlify(finalstr))
+        show.append(finalstr)
         counter += 1
         print(counter)
 
-for line in show:
-    counter1 += 1
-    scapy.wrpcap('%s.pcap' % output_path, line, append=True, sync=True)
+    pcap_writer(output_path)
